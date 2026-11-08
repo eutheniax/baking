@@ -1,0 +1,3 @@
+把蛋糕照片放在这个文件夹里（tea.jpg、oreo.jpg、os.jpg、pis.jpg、per.jpg、egg.jpg、taroegg.jpg、matcha.jpg、floss.jpg……）
+文件名要和 Google 表格「本周菜单」里「图片链接」那一栏写的完全一样。
+hero.png 是首页插画，不要删。

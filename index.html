@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#f8f5ee">
+<title>remiiibake</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Cormorant+SC:wght@500;600&family=Noto+Serif+SC:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="refinement.css">
+<link rel="stylesheet" href="details-design.css">
+<link rel="stylesheet" href="reference-layout.css">
+</head>
+<body data-view="home">
+
+<main class="wrap" id="app"><div class="center"><i>One moment…</i>加载中</div></main>
+
+<div class="bar" id="bar" hidden>
+  <div class="bar-in">
+    <div class="sum"><span id="count">还没选</span><b id="total">$0</b><s id="was"></s><em id="hintline"></em></div>
+    <button class="btn" id="submit" disabled>去结算</button>
+  </div>
+</div>
+<nav class="nav" id="nav"></nav>
+<div class="toast" id="toast" role="status"></div>
+
+
+<script src="art.js"></script>
+<script src="config.js"></script>
+<script src="app.js"></script>
+
+<script src="concept.js"></script>
+
+
+
+<script src="reference-layout.js"></script>
+<script src="walking-map/boundary.js"></script>
+<script src="walking-map/fee-boundary.js"></script>
+<script src="fulfillment.js"></script>
+<script src="payment-config.js"></script>
+<script src="payments.js"></script>
+<script src="integration.js"></script>
+</body>
+</html>
