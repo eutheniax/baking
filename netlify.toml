@@ -1,0 +1,5 @@
+# 网站是纯静态文件，不需要构建。
+# backend/ 里是 Apps Script 的备份，只放在 GitHub，不发布到网站上。
+[build]
+  publish = "."
+  command = "rm -rf backend"
