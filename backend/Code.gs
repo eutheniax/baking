@@ -82,6 +82,8 @@ function onOpen() {
     .addItem('① 初始化表格（只需一次）', 'setup')
     .addItem('开始新一周（归档订单、清零已售、更新日期）', 'startNewWeek')
     .addItem('重新计算已售', 'recalcSold')
+    .addSeparator()
+    .addItem('设置 / 重设后台密码', 'resetAdminPassword')
     .addToUi();
 }
 
@@ -486,8 +488,9 @@ function doPost(e) {
   let body;
   try { body = JSON.parse(raw); } catch (err) { return json_({ ok: false, error: '请求无效' }); }
   if (!body || typeof body !== 'object' || body.website) return json_({ ok: false, error: '请求无效' }); // website = 防机器人隐藏栏
-  if (body.action !== 'claim' && raw.length > 8000) return json_({ ok: false, error: '请求无效' });
-  const fn = { order: placeOrder, my: myOrders, claim: claimPaid, cancel: cancelOrder }[body.action];
+  if (body.action !== 'claim' && body.action !== 'admin' && raw.length > 8000) return json_({ ok: false, error: '请求无效' });
+  const fn = { order: placeOrder, my: myOrders, claim: claimPaid, cancel: cancelOrder,
+    admin_status: adminStatus, admin_setup: adminSetup, admin_login: adminLogin, admin: adminApi }[body.action];
   return json_(fn ? run_(() => fn(body)) : { ok: false, error: '请求无效' });
 }
 
@@ -813,4 +816,230 @@ function cancelOrder(form) {
   } finally {
     lock.releaseLock();
   }
+}
+
+/* ============================== 店主后台（remiiibake.com/admin） ==============================
+ * 登录：店主密码。表格菜单「🥐 remiiibake → 设置 / 重设后台密码」生成一次性初始化码，
+ *       在后台页面输入初始化码 + 新密码完成设置。重设会让所有已登录设备退出。
+ * 数据：配方、原料、模块、客人、手录订单、每周计划 存在隐藏的「后台数据」表，一行一个文档（JSON）。
+ *       网站订单仍在「订单」/「订单存档」表，后台直接读写它们的 已付 / 已取货 / 已取消。
+ */
+const ADMIN_SHEET = '后台数据';
+const ADMIN_HEADERS = ['集合', 'ID', '数据（JSON，请勿手改）', '更新时间'];
+const ADMIN_COLLECTIONS = ['ingredients', 'recipes', 'modules', 'customers', 'orders', 'plan', 'weborders', 'settings'];
+const ADMIN_TOKEN_DAYS = 30;
+
+function adminProps_() { return PropertiesService.getScriptProperties(); }
+function sha256Hex_(s) {
+  return Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, s, Utilities.Charset.UTF_8)
+    .map(b => ('0' + (b & 255).toString(16)).slice(-2)).join('');
+}
+function hashPassword_(pw, salt) { let h = salt + '|' + pw; for (let i = 0; i < 300; i++) h = sha256Hex_(salt + h); return h; }
+function randomCode_(n) { let s = ''; while (s.length < n) s += Utilities.getUuid().replace(/-/g, ''); return s.slice(0, n); }
+function hmac_(s) { return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(s, adminProps_().getProperty('adminSecret') || '')); }
+
+// 表格菜单：生成初始化码（30 分钟有效），同时清掉旧密码、让所有设备退出
+function resetAdminPassword() {
+  const ui = SpreadsheetApp.getUi();
+  const ok = ui.alert('设置 / 重设后台密码', '会清掉现在的后台密码，所有已登录的设备都要重新登录。继续吗？', ui.ButtonSet.OK_CANCEL);
+  if (ok !== ui.Button.OK) return;
+  const code = randomCode_(8).toUpperCase();
+  const p = adminProps_();
+  p.deleteProperty('adminHash'); p.deleteProperty('adminSalt');
+  p.setProperty('adminSecret', randomCode_(48));
+  p.setProperty('adminSetup', code + '|' + (Date.now() + 30 * 60 * 1000));
+  ui.alert('初始化码：' + code + '\n\n30 分钟内有效。打开网站的 /admin 页面，输入这个码和你的新密码。');
+}
+
+function adminStatus() { return { configured: !!adminProps_().getProperty('adminHash') }; }
+
+function adminSetup(form) {
+  rateLimit_('adminsetup', 10, 900, '尝试太多次了，请 15 分钟后再试');
+  const p = adminProps_();
+  const s = String(p.getProperty('adminSetup') || '').split('|');
+  const code = String(form.code || '').trim().toUpperCase();
+  if (!s[0] || Number(s[1]) < Date.now() || code !== s[0]) throw new Error('初始化码不对或已过期，请在表格菜单里重新生成');
+  const pw = String(form.password || '');
+  if (pw.length < 8) throw new Error('密码至少 8 位');
+  const salt = randomCode_(24);
+  p.setProperty('adminSalt', salt);
+  p.setProperty('adminHash', hashPassword_(pw, salt));
+  if (!p.getProperty('adminSecret')) p.setProperty('adminSecret', randomCode_(48));
+  p.deleteProperty('adminSetup');
+  return adminIssueToken_();
+}
+
+function adminLogin(form) {
+  rateLimit_('adminlogin', 10, 900, '密码错误次数太多，请 15 分钟后再试');
+  const p = adminProps_();
+  const hash = p.getProperty('adminHash'), salt = p.getProperty('adminSalt');
+  if (!hash) throw new Error('还没有设置后台密码');
+  if (hashPassword_(String(form.password || ''), salt) !== hash) throw new Error('密码不对');
+  return adminIssueToken_();
+}
+
+function adminIssueToken_() {
+  const exp = String(Date.now() + ADMIN_TOKEN_DAYS * 24 * 3600 * 1000);
+  return { token: exp + '.' + hmac_(exp), expires: Number(exp) };
+}
+function adminCheck_(token) {
+  const t = String(token || '').split('.');
+  if (t.length !== 2 || !adminProps_().getProperty('adminHash') || hmac_(t[0]) !== t[1] || Number(t[0]) < Date.now()) {
+    throw new Error('LOGIN_REQUIRED');
+  }
+}
+
+function adminSheet_() {
+  const ss = SpreadsheetApp.getActive();
+  let s = ss.getSheetByName(ADMIN_SHEET);
+  if (!s) {
+    s = ss.insertSheet(ADMIN_SHEET);
+    s.getRange(1, 1, 1, ADMIN_HEADERS.length).setValues([ADMIN_HEADERS]).setFontWeight('bold');
+    s.setFrozenRows(1);
+    s.getRange('C:C').setNumberFormat('@');
+    s.hideSheet();
+  }
+  return s;
+}
+function adminPath_(path) {
+  const m = String(path || '').match(/^([a-z]+)\/([\w:-]{1,80})$/);
+  if (!m || ADMIN_COLLECTIONS.indexOf(m[1]) < 0) throw new Error('路径无效：' + path);
+  return { coll: m[1], id: m[2] };
+}
+function adminRows_(s) {
+  const n = s.getLastRow() - 1;
+  return n > 0 ? s.getRange(2, 1, n, 3).getValues() : [];
+}
+
+// 一次写入多份文档：data 为 null 表示删除
+function adminWriteMany_(docs) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const s = adminSheet_();
+    const rows = adminRows_(s), index = {};
+    rows.forEach((r, i) => { index[r[0] + '/' + r[1]] = i + 2; });
+    const now = new Date(), appends = [], deletes = [];
+    docs.forEach(d => {
+      const p = adminPath_(d.path), key = p.coll + '/' + p.id, row = index[key];
+      if (d.data == null) { if (row) deletes.push(row); return; }
+      const json = JSON.stringify(d.data);
+      if (json.length > 45000) throw new Error('这份数据太大了，保存不了：' + key);
+      if (row) s.getRange(row, 3, 1, 2).setValues([[json, now]]);
+      else { appends.push([p.coll, p.id, json, now]); index[key] = -1; }
+    });
+    if (appends.length) s.getRange(s.getLastRow() + 1, 1, appends.length, 4).setValues(appends);
+    deletes.sort((a, b) => b - a).forEach(r => s.deleteRow(r));
+    return { saved: docs.length };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// 网站订单：本周「订单」表 + 所有「订单存档」表
+function adminWebSheets_() {
+  const ss = SpreadsheetApp.getActive();
+  return [ss.getSheetByName(SHEET.orders)].concat(ss.getSheets().filter(s => s.getName().indexOf(ARCHIVE_PREFIX) === 0)).filter(Boolean);
+}
+function adminParseWhen_(pickup, placedAt) {
+  const text = String(pickup || '');
+  const m = text.match(/(\d{1,2})\/(\d{1,2})/);
+  let date = '', time = '';
+  if (m) {
+    const base = placedAt instanceof Date ? placedAt : new Date();
+    let y = Number(Utilities.formatDate(base, tz_(), 'yyyy'));
+    const bm = Number(Utilities.formatDate(base, tz_(), 'M'));
+    if (Number(m[1]) < bm - 6) y++; else if (Number(m[1]) > bm + 6) y--;
+    date = y + '-' + ('0' + m[1]).slice(-2) + '-' + ('0' + m[2]).slice(-2);
+    time = text.slice(m.index + m[0].length).split(' · ')[0].trim();
+  }
+  return { date: date, time: time };
+}
+function adminWebOrders_() {
+  const out = [];
+  adminWebSheets_().forEach(sh => {
+    if (sh.getLastRow() < 2) return;
+    const width = Math.min(sh.getLastColumn(), ORDER_HEADERS.length);
+    sh.getRange(2, 1, sh.getLastRow() - 1, width).getValues().forEach(r => {
+      const id = String(r[COL.id - 1] || '');
+      if (!id) return;
+      let data = [];
+      try { data = JSON.parse(r[COL.data - 1] || '[]'); } catch (e) { data = []; }
+      const mode = String(r[COL.mode - 1] || '');
+      const pickup = String(r[COL.pickup - 1] || '');
+      const when = adminParseWhen_(pickup, r[COL.time - 1]);
+      out.push({
+        orderId: id,
+        current: sh.getName() === SHEET.orders,
+        placedAt: r[COL.time - 1] instanceof Date ? r[COL.time - 1].getTime() : 0,
+        name: String(r[COL.name - 1] || ''),
+        contact: String(r[COL.contact - 1] || ''),
+        pickup: pickup,
+        place: mode === '配送' ? '配送' : (mode.replace(/^自提\s*·\s*/, '') || pickup.split(' · ')[0] || ''),
+        date: when.date,
+        time: when.time,
+        arrive: String(r[COL.arrive - 1] || ''),
+        items: data,
+        amount: Number(r[COL.amount - 1]) || 0,
+        goods: r[COL.goods - 1] === '' || r[COL.goods - 1] == null ? Number(r[COL.amount - 1]) || 0 : Number(r[COL.goods - 1]) || 0,
+        fee: Number(r[COL.fee - 1]) || 0,
+        pay: String(r[COL.pay - 1] || ''),
+        payCur: String(r[COL.payCur - 1] || ''),
+        payAmt: Number(r[COL.payAmt - 1]) || 0,
+        promo: String(r[COL.promo - 1] || ''),
+        note: String(r[COL.note - 1] || ''),
+        address: String(r[COL.address - 1] || ''),
+        claimed: r[COL.claimed - 1] instanceof Date ? r[COL.claimed - 1].getTime() : (r[COL.claimed - 1] ? 1 : 0),
+        proofs: proofList_(r[COL.proof - 1]),
+        paid: r[COL.paid - 1] === true,
+        picked: r[COL.picked - 1] === true,
+        cancelled: r[COL.cancelled - 1] === true,
+      });
+    });
+  });
+  return out;
+}
+function adminSetWebFlags_(f) {
+  const id = String(f.orderId || '');
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    const sheets = adminWebSheets_();
+    for (let i = 0; i < sheets.length; i++) {
+      const sh = sheets[i];
+      if (sh.getLastRow() < 2) continue;
+      const ids = sh.getRange(2, COL.id, sh.getLastRow() - 1, 1).getValues();
+      for (let j = 0; j < ids.length; j++) {
+        if (String(ids[j][0]) !== id) continue;
+        const row = j + 2;
+        const cur = sh.getRange(row, COL.paid, 1, 3).getValues()[0];
+        const next = [f.paid == null ? cur[0] : !!f.paid, f.picked == null ? cur[1] : !!f.picked, f.cancelled == null ? cur[2] : !!f.cancelled];
+        sh.getRange(row, COL.paid, 1, 3).setValues([next]);
+        if (sh.getName() === SHEET.orders && next[2] !== (cur[2] === true)) { SpreadsheetApp.flush(); recalcSold(); }
+        return { orderId: id, paid: next[0], picked: next[1], cancelled: next[2] };
+      }
+    }
+    throw new Error('找不到网站订单 ' + id);
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function adminApi(form) {
+  adminCheck_(form.token);
+  const op = String(form.op || '');
+  if (op === 'load') {
+    const docs = {};
+    ADMIN_COLLECTIONS.forEach(c => { docs[c] = {}; });
+    adminRows_(adminSheet_()).forEach(r => {
+      if (!docs[r[0]]) return;
+      try { docs[r[0]][r[1]] = JSON.parse(r[2]); } catch (e) { /* 手改坏的行跳过 */ }
+    });
+    return { docs: docs, web: adminWebOrders_(), now: Date.now() };
+  }
+  if (op === 'put') return adminWriteMany_([{ path: form.path, data: form.data == null ? {} : form.data }]);
+  if (op === 'del') return adminWriteMany_([{ path: form.path, data: null }]);
+  if (op === 'bulk') return adminWriteMany_((Array.isArray(form.docs) ? form.docs : []).slice(0, 2000));
+  if (op === 'webflags') return adminSetWebFlags_(form);
+  throw new Error('未知操作');
 }
