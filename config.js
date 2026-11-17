@@ -14,6 +14,7 @@
   window.API_URL = isUat ? UAT : PROD;
 
   if (isUat) {
+    document.documentElement.classList.add('env-uat');
     var tag = document.createElement('div');
     tag.textContent = '测试环境 UAT · 这里下的单不是真订单';
     tag.setAttribute('style', 'position:fixed;top:0;left:0;right:0;z-index:9999;padding:4px 8px;font:12px/1.4 system-ui,sans-serif;text-align:center;color:#fff;background:#b3261e;pointer-events:none');

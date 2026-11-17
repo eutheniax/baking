@@ -1869,6 +1869,7 @@ app.addEventListener('click', function(e){
 var TOKEN_KEY = 'rb-admin-token';
 var WEB = new Map();     // 'w_' + 订单号 -> 网站订单原始数据
 var ITEMMAP = {};        // 网站商品代号 -> 配方 ID（手动对照过的）
+var WEBOV = {};          // 网站订单号 -> 后台补充的信息（客人、盲盒实际给的、备注…）
 var refreshing = false, pendingWrites = 0, lastLoad = 0;
 
 function token(){ try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } }
@@ -1908,7 +1909,8 @@ function chainRun(key, fn){
 }
 
 /* ---------- 网站订单 ---------- */
-function keyOf(name){ return String(name || '').replace(/^\s*[【\[]\s*新品\s*[】\]]\s*/, '').replace(/\s+/g, ' ').trim(); }
+function keyOf(name){ return String(name || '').replace(/^(\s*[【\[][^】\]]{0,12}[】\]])+\s*/, '').replace(/\s+/g, ' ').trim(); }
+function packOf(k){ var m = String(k).match(/[*×xX]\s*(\d{1,3})\s*[）)]?\s*$/); return m ? Math.max(1, +m[1]) : 1; } // 「芋泥蛋挞*2」= 一份 2 个
 function normKey(s){ return String(s || '').replace(/[\s（）()【】\[\]·・,，。.、]/g, '').toLowerCase(); }
 function exactRecipe(k){ var hit = ''; REC.forEach(function(r, id){ if (!hit && keyOf(r.name) === k) hit = id; }); return hit; }
 function mapRecipe(k){
@@ -1922,14 +1924,22 @@ function mapRecipe(k){
   });
   return best;
 }
+// 早期订单的取货信息没有日期：按下单时间之后最近的「周几」推算，再不行就用下单那天
+function webGuessDate(w){
+  if (!w.placedAt) return;
+  var d = new Date(w.placedAt), m = String(w.pickup || '').match(/周([日一二三四五六])\s*(.*)$/);
+  if (m){ var want = '日一二三四五六'.indexOf(m[1]); d.setDate(d.getDate() + (want - d.getDay() + 7) % 7); w.time = w.time || m[2].split(' · ')[0].trim(); }
+  w.date = ymd(d);
+}
 function webOrder(w, ov){
   var items = [], gifts = [];
   (w.items || []).forEach(function(it){
-    var k = it.k || keyOf(it.n), rid = mapRecipe(k);
-    if (it.g){ gifts.push({recipeId:rid, name:k, qty:num(it.q)}); return; }
-    items.push({recipeId:rid, name:k, qty:num(it.q), price:it.p != null ? num(it.p) : null, k:k});
+    var k = keyOf(it.k || it.n), rid = mapRecipe(k), pk = packOf(k);
+    if (it.g){ gifts.push({recipeId:rid, name:k, qty:num(it.q) * pk}); return; }
+    items.push({recipeId:rid, name:k, qty:num(it.q) * pk, price:it.p != null ? r2(num(it.p) / pk) : null, k:k});
   });
-  // 早期订单没有记录单价：先用配方价，剩下的按商品金额平均分
+  if (!w.date) webGuessDate(w);
+    // 早期订单没有记录单价：先用配方价，剩下的按商品金额平均分
   items.forEach(function(it){ if (it.price == null && REC.has(it.recipeId)) it.price = priceFor(REC.get(it.recipeId), w.date); });
   var known = items.reduce(function(t, it){ return t + (it.price != null ? it.qty * it.price : 0); }, 0);
   var unknownQty = items.reduce(function(t, it){ return t + (it.price == null ? it.qty : 0); }, 0);
@@ -1967,9 +1977,11 @@ saveOrder = function(id, obj){
   var next = Object.assign({}, cur, obj, {items:items, web:true, webId:cur.webId, webGoods:cur.webGoods, webFee:cur.webFee,
     webAmount:cur.webAmount, proofs:cur.proofs, claimed:cur.claimed, created:cur.created});
   ORD.set(id, next);
-  write('weborders/' + cur.webId, {customerId:next.customerId || '', customer:next.customer || '', contact:next.contact || '',
+  var ov = {customerId:next.customerId || '', customer:next.customer || '', contact:next.contact || '',
     place:next.place || '', date:next.date || '', time:next.time || '', notes:next.notes || '',
-    items:items.map(function(it){ var x = {recipeId:it.recipeId, name:it.name, qty:it.qty}; if (it.actual) x.actual = it.actual; return x; })});
+    items:items.map(function(it){ var x = {recipeId:it.recipeId, name:it.name, qty:it.qty}; if (it.actual) x.actual = it.actual; return x; })};
+  WEBOV[cur.webId] = ov;
+  write('weborders/' + cur.webId, ov);
   if (!!cur.paid !== !!next.paid || !!cur.picked !== !!next.picked) webFlags(cur.webId, {paid:!!next.paid, picked:!!next.picked});
   if (mapChanged) write('settings/itemmap', clone(ITEMMAP));
 };
@@ -1999,6 +2011,42 @@ function webLine(o){
   if (o.webFee) bits.push('<span class="muted">配送费 ' + money(o.webFee) + '</span>');
   return '<div class="small" style="margin:-4px 0 8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' + bits.join('') + '</div>';
 }
+
+/* ---------- 网站对照：网站商品名 -> 配方 ---------- */
+GROUPS.itemmap = 'recipes';
+SUBS.recipes.push(['itemmap', '网站对照']);
+function webKeys(){
+  var m = {};
+  WEB.forEach(function(w){ (w.items || []).forEach(function(it){ var k = keyOf(it.k || it.n); m[k] = (m[k] || 0) + num(it.q); }); });
+  return Object.keys(m).map(function(k){ return [k, m[k]]; }).sort(function(a, b){ return b[1] - a[1]; });
+}
+function autoRecipe(k){ var save = ITEMMAP[k]; delete ITEMMAP[k]; var id = mapRecipe(k); if (save) ITEMMAP[k] = save; return id; }
+function renderItemMap(){
+  var keys = webKeys(), recs = sortedRecipes();
+  var h = '<div class="head"><h1 class="page">网站对照</h1></div>' +
+    '<p class="muted small">网站菜单上的名字和配方名不一样时，在这里对应一下，网站订单的成本、毛利和本周生产就会按这个配方算。' +
+    '名字里带「*2」这类的，会自动按一份 2 个计算。名字一样的会自动对上，不用管。</p>';
+  if (!keys.length) return h + '<div class="empty">还没有网站订单。</div>';
+  var missing = keys.filter(function(e){ return !mapRecipe(e[0]); }).length;
+  if (missing) h += '<div class="warn"><strong>有 ' + missing + ' 个还没对应：</strong>这些商品在订单里算不出成本。没有配方的新品，先去「配方」页建好再回来选。</div>';
+  h += '<div class="tscroll"><table><thead><tr><th>网站上的名字</th><th class="n">卖出</th><th>对应的配方</th></tr></thead><tbody>';
+  keys.forEach(function(e){
+    var k = e[0], manual = ITEMMAP[k] && REC.has(ITEMMAP[k]) ? ITEMMAP[k] : '', auto = manual ? '' : autoRecipe(k);
+    h += '<tr><td>' + esc(k) + (packOf(k) > 1 ? ' <span class="modtag">一份 ' + packOf(k) + ' 个</span>' : '') + '</td>' +
+      '<td class="n">' + e[1] + '</td><td><select data-imap="' + esc(k) + '" aria-label="' + esc(k) + ' 对应的配方">' +
+      '<option value="">' + (auto ? '自动：' + esc(REC.get(auto).name) : '— 还没对应 —') + '</option>' +
+      recs.map(function(r){ return '<option value="' + esc(r[0]) + '"' + (manual === r[0] ? ' selected' : '') + '>' + esc(r[1].name) + '</option>'; }).join('') +
+      '</select></td></tr>';
+  });
+  return h + '</tbody></table></div>';
+}
+function rebuildWeb(){ WEB.forEach(function(w, id){ if (ORD.has(id)) ORD.set(id, webOrder(w, WEBOV[w.orderId])); }); }
+app.addEventListener('change', function(e){
+  var t = e.target; if (!t.dataset || t.dataset.imap == null) return;
+  var k = t.dataset.imap;
+  if (t.value) ITEMMAP[k] = t.value; else delete ITEMMAP[k];
+  write('settings/itemmap', clone(ITEMMAP)); rebuildWeb(); render(); toast('对照已保存。');
+});
 
 /* ---------- 登录 ---------- */
 function setChrome(on){
@@ -2034,7 +2082,17 @@ function drawLogin(configured, msg){
   });
 }
 var baseRender = render;
-render = function(){ if (mode === 'login') return; baseRender(); };
+render = function(){
+  if (mode === 'login') return;
+  if (mode === 'db' && view.tab === 'itemmap'){
+    document.querySelectorAll('nav.tabs button').forEach(function(b){ if (b.dataset.tab === 'recipes') b.setAttribute('aria-current', 'page'); else b.removeAttribute('aria-current'); });
+    app.className = 'wrap segp';
+    app.innerHTML = (banner ? '<div class="banner">' + esc(banner) + '</div>' : '') + subSegHtml() + renderItemMap();
+    lastSub.recipes = 'itemmap'; store('tab', 'itemmap'); store('sub.recipes', 'itemmap');
+    return;
+  }
+  baseRender();
+};
 
 /* ---------- 读取数据 ---------- */
 function toMap(o){ return new Map(Object.keys(o || {}).map(function(k){ return [k, o[k]]; })); }
@@ -2044,12 +2102,13 @@ function applyData(d){
   PLAN = docs.plan && docs.plan.week ? mergePlan(docs.plan.week) : defaultPlan();
   ITEMMAP = (docs.settings && docs.settings.itemmap) || {};
   ORD = toMap(docs.orders);
+  WEBOV = docs.weborders || {};
   WEB = new Map();
   (d.web || []).forEach(function(w){
     if (w.cancelled) return;
     var id = 'w_' + w.orderId;
     WEB.set(id, w);
-    ORD.set(id, webOrder(w, (docs.weborders || {})[w.orderId]));
+    ORD.set(id, webOrder(w, WEBOV[w.orderId]));
   });
 }
 function reload(silent){
