@@ -729,6 +729,7 @@ function myOrders(form) {
         promo: String(r[COL.promo - 1] || ''),
         claimed: !!r[COL.claimed - 1],
         hasProof: !!r[COL.proof - 1],
+        proofCount: proofList_(r[COL.proof - 1]).length,
         paid: r[COL.paid - 1] === true,
         picked: r[COL.picked - 1] === true,
         cancelled: r[COL.cancelled - 1] === true,
@@ -753,6 +754,10 @@ function findMyOrder_(o, form) {
   throw new Error('找不到这个订单（只能操作本周的订单）');
 }
 
+// 一个订单最多几张付款截图；「付款凭证」格子里一行一个链接
+const MAX_PROOFS = 6;
+function proofList_(cell) { return String(cell || '').split(/\s+/).filter(x => /^https:\/\//.test(x)); }
+
 // 付款截图存到你 Google Drive 的「remiiibake 付款凭证」文件夹（不公开）
 function proofFolder_() {
   const props = PropertiesService.getScriptProperties();
@@ -764,7 +769,7 @@ function proofFolder_() {
 }
 
 function claimPaid(form) {
-  rateLimit_('claim:' + norm_(form && form.contact), 10, 600);
+  rateLimit_('claim:' + norm_(form && form.contact), 20, 600);
   const m = String(form && form.image || '').match(/^data:image\/jpeg;base64,([A-Za-z0-9+/=]+)$/);
   if (!m) throw new Error('请先选择付款截图');
   const bytes = Utilities.base64Decode(m[1]);
@@ -776,10 +781,13 @@ function claimPaid(form) {
     const f = findMyOrder_(o, form);
     if (f.r[COL.cancelled - 1] === true) throw new Error('这个订单已经取消了');
     if (f.r[COL.paid - 1] === true) throw new Error('店主已经确认收款啦');
-    const file = proofFolder_().createFile(Utilities.newBlob(bytes, 'image/jpeg', f.r[COL.id - 1] + '_' + Utilities.formatDate(new Date(), tz_(), 'MMdd-HHmm') + '.jpg'));
+    const proofs = proofList_(f.r[COL.proof - 1]);
+    if (proofs.length >= MAX_PROOFS) throw new Error('每个订单最多上传 ' + MAX_PROOFS + ' 张付款截图');
+    const file = proofFolder_().createFile(Utilities.newBlob(bytes, 'image/jpeg', f.r[COL.id - 1] + '_' + Utilities.formatDate(new Date(), tz_(), 'MMdd-HHmm') + '_' + (proofs.length + 1) + '.jpg'));
+    proofs.push(file.getUrl());
     o.getRange(f.row, COL.claimed).setValue(new Date());
-    o.getRange(f.row, COL.proof).setValue(file.getUrl());
-    return true;
+    o.getRange(f.row, COL.proof).setValue(proofs.join('\n'));
+    return { count: proofs.length, max: MAX_PROOFS };
   } finally {
     lock.releaseLock();
   }
