@@ -6,7 +6,7 @@
  */
 (function () {
   var PROD = 'https://script.google.com/macros/s/AKfycbyXaPwcoM7U1yRaxH2us64qUpLxajUSQ7ZX9GJnAgXczehwbyk-7kwKdyiwPjyexw8ZzA/exec';
-  var UAT = 'https://script.google.com/macros/s/AKfycbzxoGRbH6O9vmsUWmbzv-2eMdjM3VBkyLtl2myjOiJ2zR7ACJYcjAF8o9Mx9o4j1Icu/exec'; // 测试表格「remiiibake UAT」的接口
+  var UAT = 'https://script.google.com/macros/s/AKfycbxCY2KnV_tNIeg7Qmc-N_M65MsEO-71jNacsNAm4tmmybnPEd9lH9tENhKyk4lzNqYNWA/exec'; // 测试表格「remiiibake UAT」的接口
 
   var h = location.hostname;
   var isUat = !h || h === 'localhost' || h === '127.0.0.1' || /^uat[.-]/.test(h) || (/--/.test(h) && /\.netlify\.app$/.test(h)) || (/\.pages\.dev$/.test(h) && h.split('.').length > 3);
